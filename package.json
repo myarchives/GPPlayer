@@ -1,0 +1,42 @@
+{
+  "name": "simple_google_photos_player",
+  "version": "0.1.0",
+  "private": true,
+  "dependencies": {
+    "@material-ui/core": "^3.9.2",
+    "@material-ui/icons": "^3.0.2",
+    "arraybuffer-to-buffer": "0.0.5",
+    "chardet": "^0.7.0",
+    "iconv-lite": "^0.4.24",
+    "react": "^16.8.3",
+    "react-dom": "^16.8.3",
+    "react-dropzone": "^9.0.0",
+    "react-scripts": "2.1.5",
+    "silvermine-videojs-quality-selector": "^1.1.2",
+    "smi2vtt": "^0.1.1",
+    "subsrt": "^1.0.0",
+    "typeface-roboto": "0.0.54",
+    "video.js": "^7.4.1",
+    "videojs-hotkeys": "^0.2.25"
+  },
+  "scripts": {
+    "start": "react-scripts start",
+    "build": "react-scripts build",
+    "test": "react-scripts test",
+    "eject": "react-scripts eject"
+  },
+  "eslintConfig": {
+    "extends": "react-app"
+  },
+  "browserslist": [
+    ">0.2%",
+    "not dead",
+    "not ie <= 11",
+    "not op_mini all"
+  ],
+  "CLIENT_ID": "",
+  "API_KEY": "",
+  "DISCOVERY_DOCS": [
+    "https://www.googleapis.com/discovery/v1/apis/drive/v3/rest"
+  ]
+}
