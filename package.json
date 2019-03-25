@@ -1,6 +1,6 @@
 {
   "name": "simple_google_photos_player",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "dependencies": {
     "@material-ui/core": "^3.9.2",
@@ -8,6 +8,7 @@
     "arraybuffer-to-buffer": "0.0.5",
     "chardet": "^0.7.0",
     "iconv-lite": "^0.4.24",
+    "js-file-download": "^0.4.4",
     "react": "^16.8.3",
     "react-dom": "^16.8.3",
     "react-dropzone": "^9.0.0",

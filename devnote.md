@@ -1,6 +1,16 @@
 ## to do
+- favorite feature
+- dealt with the shortly disconnected case => starts with where played
+- upload media
+- persistent scroll position when user move back
+- disable volume control by wheel
+- set focus on the player when page changed to 'play'
+- PWA
+- resolution indicator(perhaps missing some option?)
+- remember the status of player(e.g. speed, volume)
 - implement search
 - responsive UI
 - subtitle styling
 - make an icon
-- prev/next video button, reduce the size of video in 'play'
+- prev/next video button
+- reduce the size of video in 'play'
