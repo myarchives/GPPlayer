@@ -1,4 +1,5 @@
 ## to do
+- multiple accounts
 - favorite feature
 - dealt with the shortly disconnected case => starts with where played
 - upload media
