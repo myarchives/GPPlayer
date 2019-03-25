@@ -32,6 +32,20 @@ import chardet from 'chardet';
 import arrayBufferToBuffer from 'arraybuffer-to-buffer';
 import subsrt from 'subsrt';
 import smi2vtt from 'smi2vtt/dist/parse';
+import fileDownload from 'js-file-download';
+
+// Data Structure
+const DB_VERSION = 1;            // must be incremented by 1 if you changed data structure
+const DB_INFO_FILENAME = 'dbInfo.json';
+
+
+// constants
+const ALIASES_FILENAME = 'aliases.json';
+const ORIG_SUBS_FILENAME = 'origSubs.json';
+const VTTS_FILENAME = 'vtts.json';
+const UPDATE_ALIAS_DELAY = 2;   // the time for which postpone remote update. (sec)
+const PAGE_SIZE = 50;     // # of items to fetch at once
+
 
 // Authorization scopes required by the API; multiple scopes can be
 // included, separated by spaces.
@@ -50,11 +64,6 @@ const resolutions = [
   {postfix: '=m22', label: '720p'},
   {postfix: '=m18', label: '360p'},
 ];
-
-// constants
-const METAINFO_FILENAME = 'meta.json';
-const SUBTITLE_FILENAME = 'captions.vtt';
-const UPDATE_ALIAS_DELAY = 2;   // the time for which postpone remote update. (sec)
 
 class LogoutDialog extends React.Component {
   state = {
@@ -166,11 +175,26 @@ class TopBar extends Component {
       app.changePage('album');
     }
   }
+
   handleTitle = event => {
     const alias = event.target.value;
     const app = this.props.app;
-    app.setAlias(app.state.curItem.id, alias || app.state.curItem.filename);
+    const curItem = app.state.curItem;
+
+    // cancel previous timer
+    if(this.aliasTimer)   clearTimeout(this.aliasTimer);
+
+    // set new one
+    this.aliasTimer = setTimeout(() => {
+      let aliases = {};
+      aliases[curItem.id] = alias || curItem.filename;
+      app.updateAliases(aliases);
+
+      // reinit
+      this.aliasTimer = null;
+    }, UPDATE_ALIAS_DELAY*1000);
   }
+
   render = () => {
     const {classes} = this.props;
     const app = this.props.app;
@@ -193,18 +217,20 @@ class TopBar extends Component {
       );
       topLeft = <Icon>arrow_back</Icon>;
     } else if(app.state.curPage === 'play') {
-      const curItemMeta = app.state.metaInfo[app.state.curItem.id];
-      const aliasOrTitle = (curItemMeta && curItemMeta.alias) ?
-                  curItemMeta.alias : app.state.curItem.filename;
-      title = (
-        <InputBase
-          defaultValue={aliasOrTitle}
-          fullWidth
-          style={{color:'inherit'}}
-          onChange={event => this.handleTitle(event)}
-          placeholder={app.state.curItem.filename}
-        />
-      );
+      // curItem may not set in the first place
+      if(app.state.curItem) {
+        const curItem = app.state.curItem;
+        const aliasOrTitle = app.state.aliases[curItem.id] || app.state.curItem.filename;
+        title = (
+          <InputBase
+            defaultValue={aliasOrTitle}
+            fullWidth
+            style={{color:'inherit'}}
+            onChange={event => this.handleTitle(event)}
+            placeholder={app.state.curItem.filename}
+          />
+        );
+      }
       topLeft = <Icon>arrow_back</Icon>;
     }
     
@@ -268,23 +294,30 @@ class App extends Component {
   }
 
   initUserVars = () => {
+    // intermediate storage for performance
     this.albums = [];
     this.mediaItems = [];
-    this.setState({
+    this.aliases = {};
+    this.origSubs = {};
+    this.vtts = {};
+
+    return this.setState({
       albums: [],
       curAlbum: {},
       mediaItems: [],
       curItem: null,
-      nextResIdx: 0,   // resolution index to try
+      nextResIdx: 0,            // resolution index to try
       refreshPlayer: false,     // a trigger to refresh video player
-      subtitle: '',
-      metaInfo: {},
+      currentTime: 0,           // current playing time
+      aliases: {},    // {itemId: '<alias>'}
+      origSubs: {},    // {itemId: '<origSubId>'} ; original subtitles
+      vtts: {},    // {itemId: '<vttId>'} ; captions
     });
   }
 
-  componentDidMount = () => {
+  componentDidMount = async () => {
     // init user variables
-    this.initUserVars();
+    await this.initUserVars();
     
     // The same as state.albums.
     // This is intermediate storage for fetching all albums.
@@ -316,6 +349,132 @@ class App extends Component {
     document.body.appendChild(script);
   }
 
+  // update data structure from old version to the current one
+  updateDB = async () => {
+    let dbVersion = this.dbInfo.version;
+
+    if(dbVersion === 0) {
+      let proms = [];
+      // generate meta files
+      proms.push(this.createFile(ALIASES_FILENAME).then(id => {
+        this.aliasesId = id;
+        this.aliases = {};
+        return this.updateAliases({});
+      }));
+      proms.push(this.createFile(ORIG_SUBS_FILENAME).then(id => {
+        this.origSubsId = id;
+        this.origSubs = {};
+        return this.updateOrigSubs({});
+      }));
+      proms.push(this.createFile(VTTS_FILENAME).then(id => {
+        this.vttsId = id;
+        this.vtts = {};
+        return this.updateVtts({});
+      }));
+      await Promise.all(proms);
+
+      // decompose meta.json
+      const METAINFO_FILENAME = 'meta.json';
+      const result = await this.listFiles(METAINFO_FILENAME);
+      if(result.length > 0) {
+        const metaInfoId = result[0].id;
+
+        // extract alises
+        const metaInfo = JSON.parse(await this.getFile(metaInfoId));
+        let aliases = {}, isDirty = false;
+        for(const itemId in metaInfo) {
+          if(metaInfo[itemId].alias) {
+            aliases[itemId] = metaInfo[itemId].alias;
+            isDirty = true;
+          }
+        }
+  
+        // update aliases
+        if(isDirty) {
+          await this.updateAliases(aliases);
+        }
+  
+        // delete meta.json
+        this.delFile(metaInfoId);
+      }
+
+      // list folders
+      const drive = this.gapi.client.drive;
+      const response = await drive.files.list({
+        q: 'mimeType="application/vnd.google-apps.folder"',
+        spaces: 'appDataFolder',
+        fields: 'files(id, name)',
+        pageSize: 1000,
+      });
+      let folderNames = {};
+      for(const folder of response.result.files) {
+        folderNames[folder.id] = folder.name;
+      }
+  
+      // find vtts
+      let vtts = {};
+      const vttFiles = await this.listFiles('captions.vtt');
+      for(const vttFile of vttFiles) {
+        vtts[folderNames[vttFile.parents[0]]] = vttFile.id;
+      }
+      await this.updateVtts(vtts);
+
+      // increment version
+      dbVersion++;
+    }
+
+    // update db info
+    await this.updateDBInfo({version: dbVersion});
+  }
+
+  updateDBInfo = (toPut={}, toDel=[]) => {
+    // delete
+    for(const x of toDel) {
+      delete this.dbInfo[x];
+    }
+
+    // put
+    Object.assign(this.dbInfo, toPut);
+    // this.setState({dbInfo: this.dbInfo});
+    this.writeFile(this.dbInfoId, JSON.stringify(this.dbInfo));
+  }
+
+  updateAliases = (toPut={}, toDel=[]) => {
+    // delete
+    for(const x of toDel) {
+      delete this.aliases[x];
+    }
+
+    // put
+    Object.assign(this.aliases, toPut);
+    this.setState({aliases: this.aliases});
+    return this.writeFile(this.aliasesId, JSON.stringify(this.aliases));
+  }
+
+  updateVtts = (toPut={}, toDel=[]) => {
+    // delete
+    for(const x of toDel) {
+      delete this.vtts[x];
+    }
+
+    // put
+    Object.assign(this.vtts, toPut);
+    this.setState({vtts: this.vtts});
+    return this.writeFile(this.vttsId, JSON.stringify(this.vtts));
+  }
+
+  updateOrigSubs = (toPut={}, toDel=[]) => {
+    // delete
+    for(const x of toDel) {
+      delete this.origSubs[x];
+    }
+
+    // put
+    Object.assign(this.origSubs, toPut);
+    this.setState({origSubs: this.origSubs});
+    return this.writeFile(this.origSubsId, JSON.stringify(this.origSubs));
+  }
+
   handleSigninClick = event => this.gapi.auth2.getAuthInstance().signIn()
   handleSignoutClick = event => this.gapi.auth2.getAuthInstance().signOut()
   handleAlbumClick = album => {
@@ -327,28 +486,78 @@ class App extends Component {
     this.getMediaItem(item.id);
     this.changePage('play');
   }
-  handleDelSubtitleClick = async () => {
-    const folderId = await this.getFolderId(this.state.curItem.id);
-    const subtitleId = await this.getSubtitleId(folderId);
-    return this.delSubtitle(subtitleId);
+  handleDelSubtitle = async () => {
+    const curItemId = this.state.curItem.id;
+    const origSubId = this.state.origSubs[curItemId];
+    const vttId = this.state.vtts[curItemId];
+    
+    // delete subtitles
+    if(origSubId) this.delFile(origSubId);
+    if(vttId)     this.delFile(vttId);
+
+    // unlink references
+    this.updateOrigSubs({}, [curItemId]);
+    this.updateVtts({}, [curItemId]);
+
+    // update player on the fly
+    if(this.state.curPage === 'play') {
+      this.videoPlayer.removeSubtitle();
+    }
+  }
+  handleDownloadSubtitle = async () => {
+    const origSubId = this.state.origSubs[this.state.curItem.id];
+    const origSubMeta = await this.getFileMetaInfo(origSubId);
+    const origSub = Buffer.from(JSON.parse(await this.getFile(origSubId)).data);
+    fileDownload(origSub, origSubMeta.name);
   }
   
-  updateSigninStatus = isSignedIn => {
+  updateSigninStatus = async isSignedIn => {
     if(isSignedIn) {
+      // check necessity for upgrading
+      const res = await this.listFiles(DB_INFO_FILENAME);
+      if(res.length > 0) {
+        // found
+        this.dbInfoId = res[0].id;
+        let content = await this.getFile(this.dbInfoId) || "{}";
+        this.dbInfo = JSON.parse(content);
+        if(this.dbInfo.version === undefined) {
+          this.dbInfo.version = 0;
+        }
+      } else {
+        // not found
+        this.dbInfo = {};
+        this.dbInfoId = await this.createFile(DB_INFO_FILENAME);
+        await this.updateDBInfo({version: 0});
+      }
+      if(this.dbInfo.version < DB_VERSION) {
+        // update data structure
+        await this.updateDB();
+      }
+
+      // fetch meta info
+      let proms = [];
+      proms.push(this.listFiles(ALIASES_FILENAME).then(async res => {
+        this.aliasesId = res[0].id;
+        this.aliases = JSON.parse(await this.getFile(this.aliasesId));
+        this.setState({aliases: this.aliases});
+      }));
+      proms.push(this.listFiles(ORIG_SUBS_FILENAME).then(async res => {
+        this.origSubsId = res[0].id;
+        this.origSubs = JSON.parse(await this.getFile(this.origSubsId));
+        this.setState({origSubs: this.origSubs});
+      }));
+      proms.push(this.listFiles(VTTS_FILENAME).then(async res => {
+        this.vttsId = res[0].id;
+        this.vtts = JSON.parse(await this.getFile(this.vttsId));
+        this.setState({vtts: this.vtts});
+      }));
+      await Promise.all(proms);
+
       // go to main page
       this.changePage('main');
 
       // fetch album list
       this.getAlbums();
-
-      // fetch metaInfo
-      this.getMetaInfoId().then(metaInfoId => {
-        // save to class also
-        this.metaInfoId = metaInfoId;
-
-        // get the body
-        this.getMetaInfo(metaInfoId);
-      });
     } else {
       this.changePage('signin');
     }
@@ -357,13 +566,16 @@ class App extends Component {
 
   changePage = page => {
     let state = {curPage: page};
+    const curPage = this.state.curPage;
 
-    // clean up when leaving 'play'
-    if(this.state.curPage === 'play') {
+    // intermediate processings
+    if(curPage === 'album' && page === 'main') {
+      //-- from album to main --//
+      state.mediaItems = [];
+    } else if(curPage === 'play') {
       //-- leaving play --//
       state.curItem = null;
       state.nextResIdx = 0;
-      state.subtitle = '';
     }
 
     this.setState(state);
@@ -377,7 +589,7 @@ class App extends Component {
       response = await this.gapi.client.request({
         path: 'https://photoslibrary.googleapis.com/v1/albums',
         method: 'GET',
-        params: {pageToken},
+        params: {pageToken, pageSize: PAGE_SIZE},
       });
     } else {
       // init
@@ -387,26 +599,27 @@ class App extends Component {
       response = await this.gapi.client.request({
         path: 'https://photoslibrary.googleapis.com/v1/albums',
         method: 'GET',
+        params: {pageSize: PAGE_SIZE},
       });
     }
 
     // response
     if(response.status === 200) {
       //-- success --//
-      let albums = response.result.albums;
-
       // append to previous one
-      this.albums = this.albums.concat(albums);
-
-      // sort
-      this.albums.sort((l, r) => ('' + l.title).localeCompare(r.title));
-
-      // save
-      this.setState({albums: this.albums});
-
-      // request next page
-      if(response.result.nextPageToken) {
-        this.getAlbums(response.result.nextPageToken);
+      if(response.result.albums) {
+        this.albums = this.albums.concat(response.result.albums);
+  
+        // sort
+        this.albums.sort((l, r) => ('' + l.title).localeCompare(r.title));
+  
+        // save
+        this.setState({albums: this.albums});
+  
+        // request next page
+        if(response.result.nextPageToken) {
+          this.getAlbums(response.result.nextPageToken);
+        }
       }
     } else {
       //-- error --//
@@ -422,7 +635,7 @@ class App extends Component {
       response = await this.gapi.client.request({
         path: 'https://photoslibrary.googleapis.com/v1/mediaItems:search',
         method: 'POST',
-        params: {albumId, pageToken},
+        params: {albumId, pageToken, pageSize: PAGE_SIZE},
       });
     } else {
       // init
@@ -432,7 +645,7 @@ class App extends Component {
       response = await this.gapi.client.request({
         path: 'https://photoslibrary.googleapis.com/v1/mediaItems:search',
         method: 'POST',
-        params: {albumId},
+        params: {albumId, pageSize: PAGE_SIZE},
       });
     }
 
@@ -477,6 +690,18 @@ class App extends Component {
 
     reader.onload = async event => {
       let buf = arrayBufferToBuffer(reader.result);
+      const curItemId = this.state.curItem.id;
+      const oldOrigSubId = this.state.origSubs[curItemId];
+      const oldVttId = this.state.vtts[curItemId];
+
+      // upload original subtitle
+      const origSubId = await this.createFile(file.name);
+      await this.writeFile(origSubId, buf);
+      let origSubs = {};
+      origSubs[curItemId] = origSubId;
+      this.updateOrigSubs(origSubs);
+
+      // figure out encoding
       const encoding = chardet.detect(buf);
       
       // adjust encoding
@@ -493,255 +718,139 @@ class App extends Component {
       // `subsrt` produces timestamp using comma(,). Fix it.
       vtt = vtt.replace(/([0-9]),([0-9])/g, '$1.$2');
 
-      // upload
-      const folderId = await this.getFolderId(this.state.curItem.id);
-      const subtitleId = await this.getSubtitleId(folderId);
-      await this.setSubtitle(subtitleId, vtt);
+      // upload vtt
+      const vttId = await this.createFile(file.name + '.vtt');
+      await this.writeFile(vttId, vtt);
+      let vtts = {};
+      vtts[curItemId] = vttId;
+      this.updateVtts(vtts);
+      
+      // update subtitle on the fly
+      if(this.state.curPage === 'play') {
+        this.videoPlayer.updateSubtitle(vtt);
+      }
+
+      // dispose of old files
+      if(oldOrigSubId)  this.delFile(oldOrigSubId);
+      if(oldVttId)      this.delFile(oldVttId);
     }
 
     reader.readAsArrayBuffer(file);
   }
 
-  
-  
   onDropRejected = files => {
     console.error('Rejected:', files);
   }
 
   playNextRes = async () => {
+    await this.setState({nextResIdx: this.state.nextResIdx+1});
+    return this.refreshPlayer();
+  }
+
+  refreshPlayer = async (currentTime=0) => {
     // unmount video player
-    await this.setState({refreshPlayer: true});
+    await this.setState({refreshPlayer: true, currentTime});
 
-    // remount with next resolution list
-    this.setState({nextResIdx: this.state.nextResIdx+1, refreshPlayer: false});
+    // remount
+    return this.setState({refreshPlayer: false});
   }
 
-  // get the id of folder that contains some data for 'item' in Drive
-  getFolderId = async itemId => {
+  listFiles = async filename => {
     const drive = this.gapi.client.drive;
-    let response, folderId;
 
     // check if the folder exists
-    response = await drive.files.list({
-      // parents: ['appDataFolder'],
-      q: 'name="' + itemId + '" and mimeType="application/vnd.google-apps.folder"',
+    const response = await drive.files.list({
+      q: 'name="' + filename + '"',
       spaces: 'appDataFolder',
-      fields: 'files(id, name, mimeType)',
+      fields: 'files(id, parents)',
+      pageSize: 1000,
     });
-    const files = response.result.files;
-    if (files && files.length > 0) {
-      //-- found --//
-      folderId = files[0].id;
+    if(response.status === 200) {
+      return response.result.files;
     } else {
-      //-- not found --//
-      // create one
-      response = await drive.files.create({
-        name: itemId,
-        mimeType: 'application/vnd.google-apps.folder',
-        parents: ['appDataFolder'],
-        fields: 'id',
-      });
-      switch(response.status) {
-        case 200:
-          const file = response.result;
-          folderId = file.id;
-          break;
-        default:
-          console.error('Error creating the folder, ', response);
-          break;
-      }
+      console.error(response);
+      throw new Error(response);
     }
-
-    return folderId;
   }
 
-  // get the metaInfo id
-  getMetaInfoId = async () => {
+  // get the file content
+  getFile = async fileId => {
     const drive = this.gapi.client.drive;
-    let response, metaInfoId;
-
-    // check if the folder exists
-    response = await drive.files.list({
-      q: 'name="' + METAINFO_FILENAME + '"',
-      spaces: 'appDataFolder',
-      fields: 'files(id)',
-    });
-    const files = response.result.files;
-    if (files && files.length > 0) {
-      //-- found --//
-      metaInfoId = files[0].id;
-    } else {
-      //-- not found --//
-      // create one
-      response = await drive.files.create({
-        name: METAINFO_FILENAME,
-        parents: ['appDataFolder'],
-      });
-      switch(response.status) {
-        case 200:
-          const file = response.result;
-          metaInfoId = file.id;
-
-          // init
-          await this.setMetaInfo(metaInfoId, {});
-          break;
-        default:
-          console.error('Error creating the folder, ', response);
-          break;
-      }
-    }
-
-    return metaInfoId;
-  }
-
-  // get the meta info
-  getMetaInfo = async metaInfoId => {
-    const drive = this.gapi.client.drive;
-    let response, metaInfo = {};
+    let content='';
     
     // download
-    response = await drive.files.get({
-      fileId: metaInfoId,
-      alt: 'media'
+    const response = await drive.files.get({fileId, alt: 'media'});
+    switch(response.status) {
+      case 200:
+        content = response.body;
+        break;
+      default:
+        console.error(response);
+        throw new Error(response);
+    }
+
+    return content;
+  }
+
+  // get meta data of single file
+  getFileMetaInfo = async fileId => {
+    const drive = this.gapi.client.drive;
+    let content={};
+    
+    // download
+    const response = await drive.files.get({fileId});
+    switch(response.status) {
+      case 200:
+        content = JSON.parse(response.body);
+        break;
+      default:
+        console.error(response);
+        throw new Error(response);
+    }
+
+    return content;
+  }
+
+  createFile = async filename => {
+    const drive = this.gapi.client.drive;
+
+    const response = await drive.files.create({
+      name: filename,
+      parents: ['appDataFolder'],
     });
     switch(response.status) {
       case 200:
-        metaInfo = JSON.parse(response.body);
-        this.setState({metaInfo});
-        break;
+        return response.result.id;
       default:
-        console.error('Error creating the folder, ', response);
-        break;
+        console.error(response);
+        throw new Error(response);
     }
   }
 
-  // set meta info(overwrite)
-  // metaInfo: {}
-  setMetaInfo = async (metaInfoId, metaInfo) => {
-    // write
+  writeFile = async (fileId, body) => {
     const response = await this.gapi.client.request({
-      path: '/upload/drive/v3/files/' + metaInfoId,
+      path: '/upload/drive/v3/files/' + fileId,
       method: 'PATCH',
       params: {
         uploadType: 'media'
       },
-      body: JSON.stringify(metaInfo)
+      body,
     });
-    switch(response.status) {
-      case 200:
-        break;
-      default:
-        console.error('Error getting meta info', response);
-        throw new Error('Error getting meta info');
+    if(response.status !== 200) {
+      console.error(response);
+      throw new Error(response);
     }
   }
 
-  getSubtitleId = async folderId => {
-    const drive = this.gapi.client.drive;
-    let response, subtitleId;
-
-    // check if the folder exists
-    response = await drive.files.list({
-      parents: [folderId],
-      q: 'name="' + SUBTITLE_FILENAME + '" and "' + folderId + '" in parents',
-      spaces: 'appDataFolder',
-      fields: 'files(id, webContentLink, webViewLink)',
-    });
-    const files = response.result.files;
-    if (files && files.length > 0) {
-      //-- found --//
-      subtitleId = files[0].id;
-    } else {
-      //-- not found --//
-      // create one
-      response = await drive.files.create({
-        name: SUBTITLE_FILENAME,
-        // mimeType: 'application/vnd.google-apps.folder',
-        parents: [folderId],
-        // fields: 'id',
-      });
-      switch(response.status) {
-        case 200:
-          const file = response.result;
-          subtitleId = file.id;
-          break;
-        default:
-          console.error('Error creating the folder, ', response);
-          break;
-      }
-    }
-
-    return subtitleId;
-  }
-
-  setSubtitle = async (subtitleId, subtitle) => {
+  delFile = async fileId => {
     const response = await this.gapi.client.request({
-      path: '/upload/drive/v3/files/' + subtitleId,
-      method: 'PATCH',
-      params: {
-        uploadType: 'media'
-      },
-      body: subtitle
+      path: '/drive/v3/files/' + fileId,
+      method: 'DELETE',
     });
-    switch(response.status) {
-      case 200:
-        // update subtitle on the fly
-        if(this.state.curPage === 'play') {
-          this.videoPlayer.updateSubtitle(subtitle);
-        }
-        break;
-      default:
-      console.error('Error setting subtitle', response);
-      throw new Error('Error setting subtitle');
+    if(Math.floor(response.status/100) !== 2 && response.status !== 404) {
+      console.error(response);
+      throw new Error(response);
     }
-  }
-
-  // just make it empty
-  delSubtitle = subtitleId => this.setSubtitle(subtitleId, '')
-
-  getSubtitle = async subtitleId => {
-    const drive = this.gapi.client.drive;
-    let response, subtitle = '';
-    
-    // download
-    response = await drive.files.get({
-      fileId: subtitleId,
-      alt: 'media'
-    });
-    switch(response.status) {
-      case 200:
-        subtitle = response.body;
-        break;
-      default:
-        console.error('Error creating the folder, ', response);
-        break;
-    }
-
-    return subtitle;
-  }
-
-  setAlias = async (itemId, alias) => {
-    // cancel previous timer
-    if(this.aliasTimer)   clearTimeout(this.aliasTimer);
-
-    // set new one
-    this.aliasTimer = setTimeout(() => {
-      // local update
-      let metaInfo = this.state.metaInfo;
-      if(metaInfo[itemId]) {
-        metaInfo[itemId].alias = alias;   // add
-      } else {
-        metaInfo[itemId] = {alias};       // new
-      }
-      this.setState({metaInfo});
-
-      // remote update
-      this.setMetaInfo(this.metaInfoId, metaInfo);
-
-      // reinit
-      this.aliasTimer = null;
-    }, UPDATE_ALIAS_DELAY*1000);
-    
   }
 
   render = () => {
@@ -762,29 +871,42 @@ class App extends Component {
       );
     } else if(this.state.curPage === 'main') {
       //-- list albums --//
-      content = (
-        <div>
-          <TopBar app={this}/>
-          <div className={classes.demo}>
-            <List>
-              {this.state.albums.map(album =>
-                <ListItem
-                  button
-                  onClick={() => this.handleAlbumClick(album)}
-                  key={album.id}
-                >
-                  <ListItemIcon>
-                    <FolderIcon />
-                  </ListItemIcon>
-                  <ListItemText
-                    primary={album.title}
-                  />
-                </ListItem>
-              )}
-            </List>
+      if(this.state.albums.length > 0) {
+        //-- album exists --//
+        content = (
+          <div>
+            <TopBar app={this}/>
+            <div className={classes.demo}>
+              <List>
+                {this.state.albums.map(album =>
+                  <ListItem
+                    button
+                    onClick={() => this.handleAlbumClick(album)}
+                    key={album.id}
+                  >
+                    <ListItemIcon>
+                      <FolderIcon />
+                    </ListItemIcon>
+                    <ListItemText
+                      primary={album.title}
+                    />
+                  </ListItem>
+                )}
+              </List>
+            </div>
           </div>
-        </div>
-      );
+        );
+      } else {
+        //-- album doesn't exists --//
+        content = (
+          <div>
+            <TopBar app={this}/>
+            <div className={classes.demo}>
+              비었음.
+            </div>
+          </div>
+        );
+      }
     } else if(this.state.curPage === 'album') {
       //-- list video items --//
       let mediaItems = this.state.mediaItems;
@@ -798,11 +920,11 @@ class App extends Component {
       }
 
       // attach aliases
-      const metaInfo = this.state.metaInfo;
+      const aliases = this.state.aliases;
       for(let item of videoItems) {
         if(item.mimeType.startsWith('video')) {
-          if(item.id in metaInfo && metaInfo[item.id].alias) {
-            item.alias = metaInfo[item.id].alias;
+          if(item.id in aliases) {
+            item.alias = aliases[item.id];
           }
         }
       }
@@ -871,106 +993,127 @@ class App extends Component {
       //-- play the video --//
       if(this.state.curItem) {
         if(this.state.nextResIdx >= resolutions.length) {
-          console.error('no resolution available');
-          return;
+          //-- no resolution available --//
+          content = (
+            <div>
+              <TopBar app={this} />
+              <div>영상 제작 중...</div>
+            </div>
+          );
+        } else {
+          //-- resolutions available --//
+          // setup sources
+          const item = this.state.curItem;
+          let sources = [];
+          for(let i=this.state.nextResIdx;i<resolutions.length;i++) {
+            sources.push({
+              src: item.baseUrl + resolutions[i].postfix,
+              type: item.mimeType,
+              label: resolutions[i].label,
+            });
+          }
+  
+          // dropzone styles
+          const baseStyle = {
+            // width: 480,
+            height: 100,
+            borderWidth: 5,
+            borderColor: '#666',
+            borderStyle: 'dashed',
+            borderRadius: 5
+          };
+          const activeStyle = {
+            borderStyle: 'solid',
+            borderColor: '#6c6',
+            backgroundColor: '#eee'
+          };
+  
+          content = (
+            <div>
+              <TopBar app={this} />
+              <div className={classes.demo}>
+                <Grid
+                  container
+                  direction='row'
+                  justify='space-evenly'
+                  alignItems='center'
+                  className={classes.gridContainer}
+                >
+                  <Grid item xs={12} style={{padding:10}}>
+                    {!this.state.refreshPlayer &&
+                      <VideoPlayer
+                        onRef={v => {this.videoPlayer = v}}
+                        sources={sources} app={this}
+                      />
+                    }
+                  </Grid>
+                  <Grid item xs={8} style={{padding:10}}>
+                    <Dropzone
+                      accept={['.smi', '.srt', '.vtt']}
+                      onDropAccepted={this.onDropAccepted}
+                      onDropRejected={this.onDropRejected}
+                    >
+                      {({getRootProps, getInputProps, isDragActive}) => {
+                        let styles = {...baseStyle};
+                        styles = isDragActive ? {...styles, ...activeStyle} : styles;
+                        return (
+                          <div
+                            {...getRootProps()}
+                            style={styles}
+                          >
+                            <input {...getInputProps()} />
+                            <Grid
+                              container
+                              justify='center'
+                              alignItems='center'
+                              style={{height:'100%'}}
+                            >
+                              <Grid item>
+                                <Typography variant="h4">
+                                  <Icon fontSize='large'>subtitles</Icon>
+                                  {this.state.vtts[item.id] ? '자막 있음' : '자막 끌어놓기'}
+                                </Typography>
+                              </Grid>
+                            </Grid>
+                          </div>
+                        )
+                      }}
+                    </Dropzone>
+                  </Grid>
+                  <Grid item xs={4}>
+                    {this.state.origSubs[item.id] &&
+                      <Button
+                        variant="outlined"
+                        color="default"
+                        onClick={() => this.handleDownloadSubtitle()}
+                      >
+                        <Icon className={classes.rightIcon}>archive</Icon>
+                        자막 다운
+                      </Button>
+                    }
+                    {this.state.vtts[item.id] &&
+                      <Button
+                        variant="outlined"
+                        color="secondary"
+                        onClick={() => this.handleDelSubtitle()}
+                      >
+                        <DeleteIcon className={classes.rightIcon} />
+                        자막 삭제
+                      </Button>
+                    }
+                  </Grid>
+                </Grid>
+              </div>
+            </div>
+          );
         }
-
-        // setup sources
-        const item = this.state.curItem;
-        let sources = [];
-        for(let i=this.state.nextResIdx;i<resolutions.length;i++) {
-          sources.push({
-            src: item.baseUrl + resolutions[i].postfix,
-            type: item.mimeType,
-            label: resolutions[i].label,
-          });
-        }
-
-        // dropzone styles
-        const baseStyle = {
-          // width: 480,
-          height: 100,
-          borderWidth: 5,
-          borderColor: '#666',
-          borderStyle: 'dashed',
-          borderRadius: 5
-        };
-        const activeStyle = {
-          borderStyle: 'solid',
-          borderColor: '#6c6',
-          backgroundColor: '#eee'
-        };
-
+      } else {
         content = (
           <div>
             <TopBar app={this} />
-            <div className={classes.demo}>
-              <Grid
-                container
-                direction='row'
-                justify='space-evenly'
-                alignItems='center'
-                className={classes.gridContainer}
-              >
-                <Grid item xs={12} style={{padding:10}}>
-                  {!this.state.refreshPlayer &&
-                    <VideoPlayer
-                      onRef={v => {this.videoPlayer = v}}
-                      sources={sources} app={this}
-                    />
-                  }
-                </Grid>
-                <Grid item xs={8} style={{padding:10}}>
-                  <Dropzone
-                    accept={['.smi', '.srt', '.vtt']}
-                    onDropAccepted={this.onDropAccepted}
-                    onDropRejected={this.onDropRejected}
-                  >
-                    {({getRootProps, getInputProps, isDragActive}) => {
-                      let styles = {...baseStyle};
-                      styles = isDragActive ? {...styles, ...activeStyle} : styles;
-                      return (
-                        <div
-                          {...getRootProps()}
-                          style={styles}
-                        >
-                          <input {...getInputProps()} />
-                          <Grid
-                            container
-                            justify='center'
-                            alignItems='center'
-                            style={{height:'100%'}}
-                          >
-                            <Grid item>
-                              <Typography variant="h4">
-                                <Icon fontSize='large'>subtitles</Icon>
-                                {this.state.subtitle ? '자막 있음' : '자막 끌어놓기'}
-                              </Typography>
-                            </Grid>
-                          </Grid>
-                        </div>
-                      )
-                    }}
-                  </Dropzone>
-                </Grid>
-                {this.state.subtitle &&
-                  <Grid item xs={4}>
-                    <Button
-                      variant="outlined"
-                      color="secondary"
-                      onClick={() => this.handleDelSubtitleClick()}
-                    >
-                      <DeleteIcon className={classes.rightIcon} />
-                      자막 삭제
-                    </Button>
-                  </Grid>
-                }
-              </Grid>
-            </div>
+            <div>불러오는 중</div>
           </div>
         );
-      } else {
-        content = <div>불러오는 중</div>;
       }
     }
     
