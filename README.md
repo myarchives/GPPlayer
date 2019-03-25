@@ -1,6 +1,9 @@
 # GPPlayer
 A simple Google Photos Player
 
+## Demo
+[demo]
+
 ## Installation
 
 #### Requirements
@@ -26,3 +29,4 @@ A simple Google Photos Player
 [GCP console]: <https://console.cloud.google.com>
 [apache]: <https://www.apache.org/>
 [nginx]: <https://www.nginx.com/>
+[demo]: <https://gpplayer.github.io>
