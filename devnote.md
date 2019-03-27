@@ -1,4 +1,6 @@
 ## to do
+- fix disconnected case after 1 hour
+- intercept mouse back button
 - multiple accounts
 - favorite feature
 - dealt with the shortly disconnected case => starts with where played
