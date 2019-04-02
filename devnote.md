@@ -1,4 +1,5 @@
 ## to do
+- add feature to change album name
 - fix disconnected case after 1 hour
 - intercept mouse back button
 - multiple accounts
