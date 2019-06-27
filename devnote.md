@@ -6,6 +6,7 @@
 - favorite feature
 - dealt with the shortly disconnected case => starts with where played
 - upload media
+- cleaning up redundant files(subtitles, ...) in background
 - persistent scroll position when user move back
 - disable volume control by wheel
 - set focus on the player when page changed to 'play'

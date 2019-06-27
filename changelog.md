@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.1 (2019.6.)
+- Fixed opening empty album bug
+- Now acceptable capitalized subtitle extension
+- Improved subtitle converting
+
 ## 0.2.0 (2019.3.25)
 - modified data structure
 - show topbar in the midst of transition to playing

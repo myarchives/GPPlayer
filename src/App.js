@@ -654,15 +654,17 @@ class App extends Component {
       //-- success --//
       const mediaItems = response.result.mediaItems;
 
-      // append to previous one
-      this.mediaItems = this.mediaItems.concat(mediaItems);
-
-      // save
-      this.setState({mediaItems: this.mediaItems});
-
-      // request next page
-      if(response.result.nextPageToken) {
-        this.getMediaItems(albumId, response.result.nextPageToken);
+      if(mediaItems) {
+        // append to previous one
+        this.mediaItems = this.mediaItems.concat(mediaItems);
+  
+        // save
+        this.setState({mediaItems: this.mediaItems});
+  
+        // request next page
+        if(response.result.nextPageToken) {
+          this.getMediaItems(albumId, response.result.nextPageToken);
+        }
       }
     } else {
       //-- error --//
@@ -693,6 +695,7 @@ class App extends Component {
       const curItemId = this.state.curItem.id;
       const oldOrigSubId = this.state.origSubs[curItemId];
       const oldVttId = this.state.vtts[curItemId];
+      let filename = file.name.toLowerCase();
 
       // upload original subtitle
       const origSubId = await this.createFile(file.name);
@@ -709,9 +712,11 @@ class App extends Component {
       
       // convert to .vtt
       let vtt;
-      if(file.name.endsWith('.smi')) {
+      if(buf.toLowerCase().startsWith('<sami>')) {
+        // smi
         vtt = smi2vtt(buf);
       } else {
+        // assume srt
         vtt = subsrt.convert(buf, {format: 'vtt'});
       }
       
@@ -719,7 +724,7 @@ class App extends Component {
       vtt = vtt.replace(/([0-9]),([0-9])/g, '$1.$2');
 
       // upload vtt
-      const vttId = await this.createFile(file.name + '.vtt');
+      const vttId = await this.createFile(filename + '.vtt');
       await this.writeFile(vttId, vtt);
       let vtts = {};
       vtts[curItemId] = vttId;

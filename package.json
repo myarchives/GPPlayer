@@ -1,6 +1,6 @@
 {
   "name": "simple_google_photos_player",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "dependencies": {
     "@material-ui/core": "^3.9.2",
@@ -12,7 +12,7 @@
     "react": "^16.8.3",
     "react-dom": "^16.8.3",
     "react-dropzone": "^9.0.0",
-    "react-scripts": "2.1.5",
+    "react-scripts": "^3.0.1",
     "silvermine-videojs-quality-selector": "^1.1.2",
     "smi2vtt": "^0.1.1",
     "subsrt": "^1.0.0",
